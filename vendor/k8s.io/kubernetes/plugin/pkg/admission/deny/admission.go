@@ -21,10 +21,16 @@ import (
 	"io"
 
 	"k8s.io/apiserver/pkg/admission"
+	kubeapiserveradmission "k8s.io/kubernetes/pkg/kubeapiserver/admission"
 )
 
 func init() {
-	admission.RegisterPlugin("AlwaysDeny", func(config io.Reader) (admission.Interface, error) {
+	Register(&kubeapiserveradmission.Plugins)
+}
+
+// Register registers a plugin
+func Register(plugins *admission.Plugins) {
+	plugins.Register("AlwaysDeny", func(config io.Reader) (admission.Interface, error) {
 		return NewAlwaysDeny(), nil
 	})
 }

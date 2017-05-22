@@ -165,6 +165,9 @@ func ValidateDaemonSetSpec(spec *extensions.DaemonSetSpec, fldPath *field.Path) 
 	if spec.Template.Spec.RestartPolicy != api.RestartPolicyAlways {
 		allErrs = append(allErrs, field.NotSupported(fldPath.Child("template", "spec", "restartPolicy"), spec.Template.Spec.RestartPolicy, []string{string(api.RestartPolicyAlways)}))
 	}
+	if spec.Template.Spec.ActiveDeadlineSeconds != nil {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("template", "spec", "activeDeadlineSeconds"), spec.Template.Spec.ActiveDeadlineSeconds, "must not be specified"))
+	}
 	allErrs = append(allErrs, apivalidation.ValidateNonnegativeField(int64(spec.MinReadySeconds), fldPath.Child("minReadySeconds"))...)
 	allErrs = append(allErrs, apivalidation.ValidateNonnegativeField(int64(spec.TemplateGeneration), fldPath.Child("templateGeneration"))...)
 
@@ -648,6 +651,9 @@ func ValidatePodTemplateSpecForReplicaSet(template *api.PodTemplateSpec, selecto
 		if template.Spec.RestartPolicy != api.RestartPolicyAlways {
 			allErrs = append(allErrs, field.NotSupported(fldPath.Child("spec", "restartPolicy"), template.Spec.RestartPolicy, []string{string(api.RestartPolicyAlways)}))
 		}
+		if template.Spec.ActiveDeadlineSeconds != nil {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("spec", "activeDeadlineSeconds"), template.Spec.ActiveDeadlineSeconds, "must not be specified"))
+		}
 	}
 	return allErrs
 }
@@ -744,7 +750,7 @@ func validatePSPRunAsUser(fldPath *field.Path, runAsUser *extensions.RunAsUserSt
 
 	// validate range settings
 	for idx, rng := range runAsUser.Ranges {
-		allErrs = append(allErrs, validateIDRanges(fldPath.Child("ranges").Index(idx), rng)...)
+		allErrs = append(allErrs, validateUserIDRange(fldPath.Child("ranges").Index(idx), rng)...)
 	}
 
 	return allErrs
@@ -763,7 +769,7 @@ func validatePSPFSGroup(fldPath *field.Path, groupOptions *extensions.FSGroupStr
 	}
 
 	for idx, rng := range groupOptions.Ranges {
-		allErrs = append(allErrs, validateIDRanges(fldPath.Child("ranges").Index(idx), rng)...)
+		allErrs = append(allErrs, validateGroupIDRange(fldPath.Child("ranges").Index(idx), rng)...)
 	}
 	return allErrs
 }
@@ -781,7 +787,7 @@ func validatePSPSupplementalGroup(fldPath *field.Path, groupOptions *extensions.
 	}
 
 	for idx, rng := range groupOptions.Ranges {
-		allErrs = append(allErrs, validateIDRanges(fldPath.Child("ranges").Index(idx), rng)...)
+		allErrs = append(allErrs, validateGroupIDRange(fldPath.Child("ranges").Index(idx), rng)...)
 	}
 	return allErrs
 }
@@ -831,20 +837,28 @@ func validatePodSecurityPolicySysctls(fldPath *field.Path, sysctls []string) fie
 	return allErrs
 }
 
+func validateUserIDRange(fldPath *field.Path, rng extensions.UserIDRange) field.ErrorList {
+	return validateIDRanges(fldPath, int64(rng.Min), int64(rng.Max))
+}
+
+func validateGroupIDRange(fldPath *field.Path, rng extensions.GroupIDRange) field.ErrorList {
+	return validateIDRanges(fldPath, int64(rng.Min), int64(rng.Max))
+}
+
 // validateIDRanges ensures the range is valid.
-func validateIDRanges(fldPath *field.Path, rng extensions.IDRange) field.ErrorList {
+func validateIDRanges(fldPath *field.Path, min, max int64) field.ErrorList {
 	allErrs := field.ErrorList{}
 
 	// if 0 <= Min <= Max then we do not need to validate max.  It is always greater than or
 	// equal to 0 and Min.
-	if rng.Min < 0 {
-		allErrs = append(allErrs, field.Invalid(fldPath.Child("min"), rng.Min, "min cannot be negative"))
+	if min < 0 {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("min"), min, "min cannot be negative"))
 	}
-	if rng.Max < 0 {
-		allErrs = append(allErrs, field.Invalid(fldPath.Child("max"), rng.Max, "max cannot be negative"))
+	if max < 0 {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("max"), max, "max cannot be negative"))
 	}
-	if rng.Min > rng.Max {
-		allErrs = append(allErrs, field.Invalid(fldPath.Child("min"), rng.Min, "min cannot be greater than max"))
+	if min > max {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("min"), min, "min cannot be greater than max"))
 	}
 
 	return allErrs
@@ -915,7 +929,6 @@ func ValidateNetworkPolicySpec(spec *extensions.NetworkPolicySpec, fldPath *fiel
 				}
 			}
 		}
-		// TODO: Update From to be a pointer to slice as soon as auto-generation supports it.
 		for i, from := range ingress.From {
 			fromPath := ingressPath.Child("from").Index(i)
 			numFroms := 0

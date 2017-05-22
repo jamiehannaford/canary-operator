@@ -37,7 +37,6 @@ export no_proxy=127.0.0.1,localhost
 THIS_PLATFORM_BIN="${KUBE_ROOT}/_output/bin"
 
 source "${KUBE_ROOT}/hack/lib/util.sh"
-source "${KUBE_ROOT}/cluster/lib/util.sh"
 source "${KUBE_ROOT}/cluster/lib/logging.sh"
 
 kube::log::install_errexit
@@ -80,6 +79,7 @@ KUBE_NONSERVER_GROUP_VERSIONS="
  abac.authorization.kubernetes.io/v1beta1 \
  componentconfig/v1alpha1 \
  imagepolicy.k8s.io/v1alpha1\
+ admission.k8s.io/v1alpha1\
 "
 
 # This emulates "readlink -f" which is not available on MacOS X.

@@ -50,3 +50,11 @@
 # source = "https://github.com/myfork/package.git"
 
 
+
+[[dependencies]]
+  branch = "master"
+  name = "k8s.io/client-go"
+
+[[dependencies]]
+  branch = "master"
+  name = "k8s.io/kubernetes"

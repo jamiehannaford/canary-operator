@@ -43,10 +43,16 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/kubernetes/pkg/api/v1"
 	"k8s.io/kubernetes/pkg/cloudprovider"
+	"k8s.io/kubernetes/pkg/controller"
 )
 
-const ProviderName = "rackspace"
-const metaDataPath = "/media/configdrive/openstack/latest/meta_data.json"
+const (
+	ProviderName          = "rackspace"
+	MetaDataPath          = "/media/configdrive/openstack/latest/meta_data.json"
+	VolumeAvailableStatus = "available"
+	VolumeInUseStatus     = "in-use"
+	VolumeErrorStatus     = "error"
+)
 
 var ErrNotFound = errors.New("Failed to find object")
 var ErrMultipleResults = errors.New("Multiple results where only one expected")
@@ -146,16 +152,16 @@ func parseMetaData(file io.Reader) (string, error) {
 	metaData := MetaData{}
 	err = json.Unmarshal(metaDataBytes, &metaData)
 	if err != nil {
-		return "", fmt.Errorf("Cannot parse %s: %v", metaDataPath, err)
+		return "", fmt.Errorf("Cannot parse %s: %v", MetaDataPath, err)
 	}
 
 	return metaData.UUID, nil
 }
 
 func readInstanceID() (string, error) {
-	file, err := os.Open(metaDataPath)
+	file, err := os.Open(MetaDataPath)
 	if err != nil {
-		return "", fmt.Errorf("Cannot open %s: %v", metaDataPath, err)
+		return "", fmt.Errorf("Cannot open %s: %v", MetaDataPath, err)
 	}
 	defer file.Close()
 
@@ -212,6 +218,9 @@ func newRackspace(cfg Config) (*Rackspace, error) {
 
 	return &os, nil
 }
+
+// Initialize passes a Kubernetes clientBuilder interface to the cloud provider
+func (os *Rackspace) Initialize(clientBuilder controller.ControllerClientBuilder) {}
 
 type Instances struct {
 	compute *gophercloud.ServiceClient
@@ -381,10 +390,16 @@ func (i *Instances) NodeAddresses(nodeName types.NodeName) ([]v1.NodeAddress, er
 	// net.ParseIP().String() is to maintain compatibility with the old code
 	parsedIP := net.ParseIP(ip).String()
 	return []v1.NodeAddress{
-		{Type: v1.NodeLegacyHostIP, Address: parsedIP},
 		{Type: v1.NodeInternalIP, Address: parsedIP},
 		{Type: v1.NodeExternalIP, Address: parsedIP},
 	}, nil
+}
+
+// NodeAddressesByProviderID returns the node addresses of an instances with the specified unique providerID
+// This method will not be called from the node that is requesting this ID. i.e. metadata service
+// and other local methods cannot be used here
+func (i *Instances) NodeAddressesByProviderID(providerID string) ([]v1.NodeAddress, error) {
+	return []v1.NodeAddress{}, errors.New("unimplemented")
 }
 
 // mapNodeNameToServerName maps from a k8s NodeName to a rackspace Server Name
@@ -418,6 +433,13 @@ func (i *Instances) InstanceID(nodeName types.NodeName) (string, error) {
 // InstanceType returns the type of the specified instance.
 func (i *Instances) InstanceType(name types.NodeName) (string, error) {
 	return "", nil
+}
+
+// InstanceTypeByProviderID returns the cloudprovider instance type of the node with the specified unique providerID
+// This method will not be called from the node that is requesting this ID. i.e. metadata service
+// and other local methods cannot be used here
+func (i *Instances) InstanceTypeByProviderID(providerID string) (string, error) {
+	return "", errors.New("unimplemented")
 }
 
 func (i *Instances) AddSSHKeyToAllInstances(user string, keyData []byte) error {
@@ -466,12 +488,28 @@ func (os *Rackspace) GetZone() (cloudprovider.Zone, error) {
 }
 
 // Create a volume of given size (in GiB)
-func (rs *Rackspace) CreateVolume(name string, size int, vtype, availability string, tags *map[string]string) (volumeName string, err error) {
-	return "", errors.New("unimplemented")
+func (rs *Rackspace) CreateVolume(name string, size int, vtype, availability string, tags *map[string]string) (volumeName string, volumeAZ string, err error) {
+	return "", "", errors.New("unimplemented")
 }
 
 func (rs *Rackspace) DeleteVolume(volumeName string) error {
 	return errors.New("unimplemented")
+}
+
+func (rs *Rackspace) OperationPending(diskName string) (bool, string, error) {
+	disk, err := rs.getVolume(diskName)
+	if err != nil {
+		return false, "", err
+	}
+	volumeStatus := disk.Status
+	if volumeStatus == VolumeErrorStatus {
+		glog.Errorf("status of volume %s is %s", diskName, volumeStatus)
+		return false, volumeStatus, nil
+	}
+	if volumeStatus == VolumeAvailableStatus || volumeStatus == VolumeInUseStatus {
+		return false, disk.Status, nil
+	}
+	return true, volumeStatus, nil
 }
 
 // Attaches given cinder volume to the compute running kubelet
@@ -479,6 +517,12 @@ func (rs *Rackspace) AttachDisk(instanceID string, diskName string) (string, err
 	disk, err := rs.getVolume(diskName)
 	if err != nil {
 		return "", err
+	}
+
+	if disk.Status != VolumeAvailableStatus {
+		errmsg := fmt.Sprintf("volume %s status is %s, not %s, can not be attached to instance %s.", disk.Name, disk.Status, VolumeAvailableStatus, instanceID)
+		glog.Errorf(errmsg)
+		return "", errors.New(errmsg)
 	}
 
 	compute, err := rs.getComputeClient()
@@ -576,6 +620,12 @@ func (rs *Rackspace) DetachDisk(instanceID string, partialDiskId string) error {
 		return err
 	}
 
+	if disk.Status != VolumeInUseStatus {
+		errmsg := fmt.Sprintf("can not detach volume %s, its status is %s.", disk.Name, disk.Status)
+		glog.Errorf(errmsg)
+		return errors.New(errmsg)
+	}
+
 	compute, err := rs.getComputeClient()
 	if err != nil {
 		return err
@@ -612,6 +662,11 @@ func (rs *Rackspace) GetAttachmentDiskPath(instanceID string, diskName string) (
 	disk, err := rs.getVolume(diskName)
 	if err != nil {
 		return "", err
+	}
+	if disk.Status != VolumeInUseStatus {
+		errmsg := fmt.Sprintf("can not get device path of volume %s, its status is %s.", disk.Name, disk.Status)
+		glog.Errorf(errmsg)
+		return "", errors.New(errmsg)
 	}
 	if len(disk.Attachments) > 0 && disk.Attachments[0]["server_id"] != nil {
 		if instanceID == disk.Attachments[0]["server_id"] {

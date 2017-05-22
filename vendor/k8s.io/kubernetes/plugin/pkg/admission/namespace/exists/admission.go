@@ -31,7 +31,12 @@ import (
 )
 
 func init() {
-	admission.RegisterPlugin("NamespaceExists", func(config io.Reader) (admission.Interface, error) {
+	Register(&kubeapiserveradmission.Plugins)
+}
+
+// Register registers a plugin
+func Register(plugins *admission.Plugins) {
+	plugins.Register("NamespaceExists", func(config io.Reader) (admission.Interface, error) {
 		return NewExists(), nil
 	})
 }
