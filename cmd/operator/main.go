@@ -1,11 +1,13 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"time"
 
 	"github.com/jamiehannaford/canary-operator/pkg/controller"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/kubernetes/pkg/client/clientset_generated/clientset"
@@ -23,9 +25,13 @@ var (
 	retryPeriod   = 3 * time.Second
 )
 
+var (
+	namespace string
+)
+
 func main() {
-	ns := os.Getenv("NAMESPACE")
-	if len(ns) == 0 {
+	namespace = os.Getenv("NAMESPACE")
+	if len(namespace) == 0 {
 		log.Fatal("NAMESPACE is a required env var")
 	}
 
@@ -43,7 +49,7 @@ func main() {
 		Identity:      id,
 		EventRecorder: &record.FakeRecorder{},
 	}
-	lock, err := rl.New(rl.ConfigMapsResourceLock, ns, lockName, client, config)
+	lock, err := rl.New(rl.ConfigMapsResourceLock, namespace, lockName, client, config)
 	if err != nil {
 		log.Fatalf("Failed to create lock: %v", err)
 	}
@@ -71,12 +77,31 @@ func kubeClient() (*clientset.Clientset, error) {
 }
 
 func runApp(stop <-chan struct{}) {
+	cfg, err := newControllerConfig()
+	if err != nil {
+		fmt.Printf("Error: %v", err)
+		return
+	}
 	for {
-		c := controller.New()
+		c := controller.New(cfg)
 		err := c.Run()
 		switch err {
 		default:
 			log.Fatalf("Could not run controller: %v", err)
 		}
 	}
+}
+
+func newControllerConfig() (*controller.Config, error) {
+	cfg, err := rest.InClusterConfig()
+	if err != nil {
+		panic(err)
+	}
+
+	kubecli := kubernetes.NewForConfigOrDie(cfg)
+
+	return &controller.Config{
+		Namespace: namespace,
+		KubeCli:   kubecli,
+	}, nil
 }
