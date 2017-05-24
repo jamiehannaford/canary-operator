@@ -13,7 +13,7 @@ release:
 	@docker push jamiehannaford/canary-operator
 
 redeploy:
-	@kubectl delete deployment canary-operator
+	@kubectl delete -n kube-system deployment canary-operator
 	@kubectl create -f build/deployment.yaml
 
 .PHONY: build release redeploy
