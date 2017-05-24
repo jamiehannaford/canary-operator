@@ -1,0 +1,7 @@
+apiVersion: "canaries.jh/v1beta1"
+kind: "Canary"
+metadata:
+  name: "test"
+  namespace: kube-system
+spec:
+  size: 3
