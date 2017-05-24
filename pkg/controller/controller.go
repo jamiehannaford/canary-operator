@@ -268,53 +268,52 @@ func (c Controller) watchCanaries(watchVersion string) (<-chan *Event, <-chan er
 
 			// decode
 			decoder := json.NewDecoder(resp.Body)
-			for {
-				// create event
-				ev, st, err := pollEvent(decoder)
 
-				// check errors
-				if err != nil {
-					if err == io.EOF {
-						// apiserver will close stream periodically
-						fmt.Println("apiserver closed stream")
+			// create event
+			ev, st, err := pollEvent(decoder)
+
+			// check errors
+			if err != nil {
+				if err == io.EOF {
+					// apiserver will close stream periodically
+					fmt.Println("apiserver closed stream")
+					break
+				}
+
+				err := fmt.Errorf("received invalid event from API server: %v", err)
+				errorCh <- err
+				return
+			}
+
+			if st != nil {
+				resp.Body.Close()
+
+				if st.Code == http.StatusGone {
+					// event history is outdated.
+					// if nothing has changed, we can go back to watch again.
+					canaryList, err := c.getCanaryList(c.config.KubeCli.CoreV1().RESTClient(), c.config.Namespace)
+					if err == nil && !c.isCanariesCacheStale(canaryList.Items) {
+						watchVersion = canaryList.Metadata.ResourceVersion
 						break
 					}
 
-					err := fmt.Errorf("received invalid event from API server: %v", err)
-					errorCh <- err
+					// if anything has changed (or error on relist), we have to rebuild the state.
+					// go to recovery path
+					errorCh <- errors.New("requested version is outdated in apiserver")
 					return
 				}
 
-				if st != nil {
-					resp.Body.Close()
-
-					if st.Code == http.StatusGone {
-						// event history is outdated.
-						// if nothing has changed, we can go back to watch again.
-						canaryList, err := c.getCanaryList(c.config.KubeCli.CoreV1().RESTClient(), c.config.Namespace)
-						if err == nil && !c.isCanariesCacheStale(canaryList.Items) {
-							watchVersion = canaryList.Metadata.ResourceVersion
-							break
-						}
-
-						// if anything has changed (or error on relist), we have to rebuild the state.
-						// go to recovery path
-						errorCh <- errors.New("requested version is outdated in apiserver")
-						return
-					}
-
-					fmt.Printf("unexpected status response from API server: %v\n", st.Message)
-				}
-
-				// check status
-				fmt.Printf("canary event: %v %v", ev.Type, ev.Object.Spec)
-
-				// update watchVersion
-				watchVersion = ev.Object.Metadata.ResourceVersion
-
-				// add event to channel
-				eventCh <- ev
+				fmt.Printf("unexpected status response from API server: %v\n", st.Message)
 			}
+
+			// check status
+			fmt.Printf("canary event: %v %v", ev.Type, ev.Object.Spec)
+
+			// update watchVersion
+			watchVersion = ev.Object.Metadata.ResourceVersion
+
+			// add event to channel
+			eventCh <- ev
 
 			// close body
 			resp.Body.Close()
