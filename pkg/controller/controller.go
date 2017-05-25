@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/jamiehannaford/canary-operator/pkg/canary"
@@ -37,6 +38,8 @@ type Controller struct {
 
 	canaries  map[string]*canary.Canary
 	canaryRVs map[string]string
+	waitGroup sync.WaitGroup
+	haltMap   map[string]chan bool
 }
 
 type Event struct {
@@ -49,10 +52,11 @@ func New(config *Config) Controller {
 		config:    config,
 		canaries:  make(map[string]*canary.Canary),
 		canaryRVs: make(map[string]string),
+		haltMap:   make(map[string]chan bool),
 	}
 }
 
-func (c Controller) Run() error {
+func (c *Controller) Run() error {
 	var (
 		watchVersion string
 		err          error
@@ -71,6 +75,14 @@ func (c Controller) Run() error {
 
 	fmt.Printf("starts running from watch version: %s\n", watchVersion)
 
+	// shut down canary processes if necessary
+	defer func() {
+		for _, ch := range c.haltMap {
+			close(ch)
+		}
+		c.waitGroup.Wait()
+	}()
+
 	// create watch/error channels
 	eventCh, errorCh := c.watchCanaries(watchVersion)
 
@@ -87,7 +99,7 @@ func (c Controller) Run() error {
 	return <-errorCh
 }
 
-func (c Controller) createTPR() error {
+func (c *Controller) createTPR() error {
 	tpr := &v1beta1extensions.ThirdPartyResource{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: spec.TPRName(),
@@ -105,7 +117,7 @@ func (c Controller) createTPR() error {
 	return waitEtcdTPRReady(c.config.KubeCli.CoreV1().RESTClient(), 3*time.Second, 30*time.Second, c.config.Namespace)
 }
 
-func (c Controller) initTPR() (string, error) {
+func (c *Controller) initTPR() (string, error) {
 	watchVersion := "0"
 	err := c.createTPR()
 
@@ -133,10 +145,12 @@ func (c *Controller) findAllCanaries() (string, error) {
 
 	for i := range canaryList.Items {
 		can := canaryList.Items[i]
+		haltingCh := make(chan bool)
 
-		nc := canary.New(&can)
+		nc := canary.New(canary.Config{KubeCli: c.config.KubeCli}, &can, haltingCh, &c.waitGroup)
 		c.canaries[can.Metadata.Name] = nc
 		c.canaryRVs[can.Metadata.Name] = can.Metadata.ResourceVersion
+		c.haltMap[can.Metadata.Name] = haltingCh
 	}
 
 	return canaryList.Metadata.ResourceVersion, nil
@@ -219,11 +233,11 @@ func newTPRClient() (*http.Client, error, string) {
 	return restcli.Client, nil, masterURL
 }
 
-func (c Controller) getListPath(ns string) string {
+func (c *Controller) getListPath(ns string) string {
 	return fmt.Sprintf("apis/%s/%s/namespaces/%s/canaries", spec.TPRGroup, spec.TPRVersion, ns)
 }
 
-func (c Controller) getCanaryList(restcli rest.Interface, ns string) (*spec.CanaryList, error) {
+func (c *Controller) getCanaryList(restcli rest.Interface, ns string) (*spec.CanaryList, error) {
 	b, err := restcli.Get().RequestURI(c.getListPath(ns)).DoRaw()
 	if err != nil {
 		return nil, err
@@ -236,7 +250,7 @@ func (c Controller) getCanaryList(restcli rest.Interface, ns string) (*spec.Cana
 	return canaries, nil
 }
 
-func (c Controller) watchCanaries(watchVersion string) (<-chan *Event, <-chan error) {
+func (c *Controller) watchCanaries(watchVersion string) (<-chan *Event, <-chan error) {
 	eventCh := make(chan *Event)
 	errorCh := make(chan error)
 
@@ -338,15 +352,17 @@ func (c *Controller) isCanariesCacheStale(currentCanaries []spec.Canary) bool {
 	return false
 }
 
-func (c Controller) handleCanaryEvent(event *Event) error {
+func (c *Controller) handleCanaryEvent(event *Event) error {
 	canarySpec := event.Object
 	canaryName := canarySpec.Metadata.Name
 
 	switch event.Type {
 	case watch.Added:
-		newCanary := canary.New(canarySpec)
+		haltingCh := make(chan bool)
+		newCanary := canary.New(canary.Config{KubeCli: c.config.KubeCli}, canarySpec, haltingCh, &c.waitGroup)
 		c.canaries[canaryName] = newCanary
 		c.canaryRVs[canaryName] = canarySpec.Metadata.ResourceVersion
+		c.haltMap[canaryName] = haltingCh
 
 	case watch.Modified:
 		if _, ok := c.canaries[canaryName]; !ok {
